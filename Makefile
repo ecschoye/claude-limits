@@ -3,7 +3,7 @@ BUNDLE  := build/$(APP).app
 BIN     := $(BUNDLE)/Contents/MacOS/$(APP)
 SRCS    := $(wildcard Sources/*.swift)
 TARGET  := arm64-apple-macosx14.0
-FRAMEWORKS := -framework SwiftUI -framework AppKit -framework ServiceManagement -framework Security -framework UserNotifications
+FRAMEWORKS := -framework SwiftUI -framework AppKit -framework ServiceManagement -framework Security -framework UserNotifications -framework Network
 
 # Stable self-signed identity if it exists (so keychain "Always Allow" persists across rebuilds),
 # else ad-hoc. Create the identity once: see `make codesign-help`.
