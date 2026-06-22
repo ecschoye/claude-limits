@@ -6,8 +6,8 @@ struct SettingsView: View {
     @AppStorage(MenuConfig.key) private var iconsCSV = MenuConfig.defaultIcons
     @AppStorage(ColorPrefs.warnAtKey) private var warnAt = 60
     @AppStorage(ColorPrefs.critAtKey) private var critAt = 85
-    @AppStorage("or.notify") private var notifyLow = true
     @AppStorage("or.threshold") private var threshold = 5.0
+    @AppStorage("or.keySource") private var keySource = "zshenv"
     @State private var orKey = KeychainStore.read("openrouter") ?? ""
 
     private let providers: [(id: String, name: String, metrics: [(id: String, label: String)])] = [
@@ -24,14 +24,20 @@ struct SettingsView: View {
                         Toggle("Show \(m.label)", isOn: iconBinding("\(p.id):\(m.id)"))
                     }
                     if p.id == "openrouter" {
-                        SecureField("API key (blank = read ~/.zshenv)", text: $orKey)
-                        Button("Save key") {
-                            KeychainStore.write("openrouter", orKey.trimmingCharacters(in: .whitespaces))
+                        Picker("API key", selection: $keySource) {
+                            Text("~/.zshenv").tag("zshenv")
+                            Text("Paste key").tag("custom")
                         }
-                        Toggle("Notify when credits low", isOn: $notifyLow)
-                        if notifyLow {
-                            Stepper("Alert below $\(Int(threshold))", value: $threshold, in: 1...100, step: 1)
+                        if keySource == "custom" {
+                            HStack {
+                                SecureField("Paste key", text: $orKey)
+                                Button("Save") {
+                                    KeychainStore.write("openrouter", orKey.trimmingCharacters(in: .whitespaces))
+                                }
+                            }
                         }
+                        Stepper(threshold == 0 ? "Alert: off" : "Alert me when below $\(Int(threshold))",
+                                value: $threshold, in: 0...100, step: 1)
                     }
                 }
             }

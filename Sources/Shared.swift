@@ -16,11 +16,8 @@ struct Metric: Identifiable, Equatable {
     }
 }
 
-// OpenRouter low-credit notification prefs.
+// OpenRouter low-credit alert threshold ($). 0 = off.
 enum NotifyPrefs {
-    static var enabled: Bool {
-        UserDefaults.standard.object(forKey: "or.notify") == nil ? true : UserDefaults.standard.bool(forKey: "or.notify")
-    }
     static var threshold: Double {
         (UserDefaults.standard.object(forKey: "or.threshold") as? Double) ?? 5
     }

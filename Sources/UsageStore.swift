@@ -85,8 +85,9 @@ final class UsageStore {
 
     // OpenRouter low-credit local notification, debounced to once per downward crossing.
     private func checkLowCredit() {
-        guard NotifyPrefs.enabled, let m = metric("openrouter", "credits"), let remaining = m.amount else { return }
-        if remaining < NotifyPrefs.threshold {
+        let threshold = NotifyPrefs.threshold
+        guard threshold > 0, let m = metric("openrouter", "credits"), let remaining = m.amount else { return }
+        if remaining < threshold {
             if !lowCreditNotified { postLowCredit(m.display); lowCreditNotified = true }
         } else {
             lowCreditNotified = false

@@ -21,8 +21,11 @@ struct OpenRouterProvider: UsageProvider {
         return .ok(metrics)
     }
 
-    // env (if launched from a shell) -> ~/.zshenv -> our own Keychain item (Settings field).
+    // Source chosen in Settings: "custom" prefers the pasted Keychain key; otherwise
+    // env (if launched from a shell) -> ~/.zshenv -> Keychain.
     static func key() -> String? {
+        if UserDefaults.standard.string(forKey: "or.keySource") == "custom",
+           let k = KeychainStore.read("openrouter"), !k.isEmpty { return k }
         if let k = ProcessInfo.processInfo.environment["OPENROUTER_API_KEY"], !k.isEmpty { return k }
         if let k = fromZshenv() { return k }
         return KeychainStore.read("openrouter")
