@@ -1,131 +1,44 @@
 import SwiftUI
-import ServiceManagement
+import AppKit
 
+// Per-icon popup: shows ONLY this window's detail, plus a gear that opens the settings window.
 struct PopupView: View {
     let store: UsageStore
-    @State private var showSettings = false
+    let windowID: String          // "session" | "weekly"
+    let onOpenSettings: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if showSettings {
-                SettingsPanel()
-            } else {
-                content
+        VStack(alignment: .leading, spacing: 10) {
+            switch store.state {
+            case .ok(let windows):
+                if let w = windows.first(where: { $0.id == windowID }) {
+                    WindowRow(window: w)
+                } else {
+                    Text("No data for this window.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            case .loading:
+                Label("Loading…", systemImage: "hourglass").foregroundStyle(.secondary)
+            default:
+                ProblemRow(state: store.state)
             }
 
             Divider()
-
             HStack {
-                IconButton(symbol: "gearshape", help: "Settings", active: showSettings) {
-                    showSettings.toggle()
-                }
                 Spacer()
+                Button(action: onOpenSettings) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13))
+                        .frame(width: 24, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .help("Settings")
+                .accessibilityLabel("Settings")
             }
         }
         .padding(14)
-        .frame(width: 260)
-        // No refresh on open — the background poll keeps data fresh and the usage endpoint
-        // rate-limits aggressively. Use the Refresh button for an explicit (throttled) update.
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        switch store.state {
-        case .ok(let windows):
-            ForEach(windows) { WindowRow(window: $0) }
-        case .loading:
-            Label("Loading…", systemImage: "hourglass").foregroundStyle(.secondary)
-        default:
-            ProblemRow(state: store.state)
-        }
-    }
-}
-
-private struct IconButton: View {
-    let symbol: String
-    let help: String
-    var active = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 14))
-                .frame(width: 28, height: 24)
-                .contentShape(Rectangle())
-                .foregroundStyle(active ? Color.accentColor : .primary)
-        }
-        .buttonStyle(.borderless)
-        .help(help)
-        .accessibilityLabel(help)
-    }
-}
-
-private struct SettingsPanel: View {
-    @AppStorage(Keys.show5h) private var show5h = true
-    @AppStorage(Keys.show7d) private var show7d = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Menu bar").font(.caption).foregroundStyle(.secondary)
-            // Disable turning off the last remaining item (else no menu bar icon is left).
-            Toggle("Show 5h", isOn: $show5h).toggleStyle(.checkbox)
-                .disabled(show5h && !show7d)
-            Toggle("Show 7d", isOn: $show7d).toggleStyle(.checkbox)
-                .disabled(show7d && !show5h)
-            Divider()
-            LaunchAtLogin()
-            Divider()
-            Button("Quit Claude Limits") { NSApplication.shared.terminate(nil) }
-        }
-    }
-}
-
-private struct LaunchAtLogin: View {
-    @State private var status = SMAppService.mainApp.status
-    @State private var errorText: String?
-
-    private var inApplications: Bool {
-        let p = Bundle.main.bundlePath
-        return p.hasPrefix("/Applications/")
-            || p.hasPrefix(NSHomeDirectory() + "/Applications/")
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle("Launch at login", isOn: Binding(
-                get: { status == .enabled },
-                set: { setEnabled($0) }))
-                .toggleStyle(.checkbox)
-
-            if !inApplications {
-                note("Install to /Applications to enable launch at login.")
-            } else if status == .requiresApproval {
-                note("Approve in System Settings > General > Login Items.")
-            }
-            if let errorText {
-                note(errorText, color: .orange)
-            }
-        }
-        .onAppear { status = SMAppService.mainApp.status }  // re-read each time the panel opens
-    }
-
-    private func note(_ text: String, color: Color = .secondary) -> some View {
-        Text(text)
-            .font(.caption2)
-            .foregroundStyle(color)
-            .fixedSize(horizontal: false, vertical: true)   // wrap, stays readable
-    }
-
-    private func setEnabled(_ on: Bool) {
-        do {
-            if on { try SMAppService.mainApp.register() }
-            else  { try SMAppService.mainApp.unregister() }
-            errorText = nil
-        } catch {
-            errorText = error.localizedDescription
-        }
-        status = SMAppService.mainApp.status   // authoritative truth, not the requested value
+        .frame(width: 240)
     }
 }
 
@@ -140,8 +53,16 @@ private struct WindowRow: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(color(window))
             }
-            ProgressView(value: Double(min(window.percent, 100)), total: 100)
-                .tint(color(window))
+            // Custom bar with explicit fills — ProgressView greys out when the popover
+            // window isn't key, which made the color appear only on focus.
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.quaternary)
+                    Capsule().fill(color(window))
+                        .frame(width: geo.size.width * CGFloat(min(window.percent, 100)) / 100)
+                }
+            }
+            .frame(height: 6)
             HStack {
                 Text(window.isActive ? "active" : "idle")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -189,17 +110,52 @@ private struct ProblemRow: View {
     }
 }
 
-// Color from the server's own severity when known, else fall back to a percent threshold.
+// MARK: - Color tiers (user-customizable thresholds + colors)
+
+enum ColorPrefs {
+    static let warnAtKey = "color.warnAt"
+    static let critAtKey = "color.critAt"
+    static let normalKey = "color.normalHex"
+    static let warnKey = "color.warnHex"
+    static let critKey = "color.critHex"
+
+    static let defaultNormal = "#34C759"
+    static let defaultWarn = "#FFCC00"
+    static let defaultCrit = "#FF3B30"
+
+    private static var ud: UserDefaults { .standard }
+    static var warnAt: Int { ud.object(forKey: warnAtKey) == nil ? 60 : ud.integer(forKey: warnAtKey) }
+    static var critAt: Int { ud.object(forKey: critAtKey) == nil ? 85 : ud.integer(forKey: critAtKey) }
+    static var normal: Color { Color(hex: ud.string(forKey: normalKey) ?? defaultNormal) ?? .green }
+    static var warn: Color { Color(hex: ud.string(forKey: warnKey) ?? defaultWarn) ?? .yellow }
+    static var crit: Color { Color(hex: ud.string(forKey: critKey) ?? defaultCrit) ?? .red }
+}
+
+// Color by user-configured percent thresholds.
 func color(_ w: UsageWindow) -> Color {
-    switch w.severity {
-    case .normal: return .green
-    case .warning: return .yellow
-    case .critical: return .red
-    case .unknown:
-        switch w.percent {
-        case ..<60: return .green
-        case 60..<85: return .yellow
-        default: return .red
-        }
+    switch w.percent {
+    case ..<ColorPrefs.warnAt: return ColorPrefs.normal
+    case ..<ColorPrefs.critAt: return ColorPrefs.warn
+    default: return ColorPrefs.crit
+    }
+}
+
+extension Color {
+    init?(hex: String) {
+        var s = hex.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+        self.init(.sRGB,
+                  red: Double((v >> 16) & 0xFF) / 255,
+                  green: Double((v >> 8) & 0xFF) / 255,
+                  blue: Double(v & 0xFF) / 255)
+    }
+
+    var hexString: String {
+        let ns = NSColor(self).usingColorSpace(.sRGB) ?? .white
+        return String(format: "#%02X%02X%02X",
+                      Int(round(ns.redComponent * 255)),
+                      Int(round(ns.greenComponent * 255)),
+                      Int(round(ns.blueComponent * 255)))
     }
 }
