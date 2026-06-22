@@ -114,14 +114,21 @@ final class MenuBarController {
         popovers.values.forEach { if $0.isShown { $0.performClose(nil) } }
         if settingsWindow == nil {
             let host = NSHostingController(rootView: SettingsView())
-            let win = NSWindow(contentViewController: host)
+            let win = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 340, height: 460),
+                styleMask: [.titled, .closable],
+                backing: .buffered, defer: false)
+            win.contentViewController = host
             win.title = "Claude Limits Settings"
-            win.styleMask = [.titled, .closable]
             win.isReleasedWhenClosed = false
             settingsWindow = win
         }
-        settingsWindow?.makeKeyAndOrderFront(nil)
-        settingsWindow?.center()   // after ordering front, so it's sized and centers on screen
+        guard let win = settingsWindow else { return }
+        win.makeKeyAndOrderFront(nil)
+        if let screen = win.screen ?? NSScreen.main {
+            let f = win.frame, vis = screen.visibleFrame
+            win.setFrameOrigin(NSPoint(x: vis.midX - f.width / 2, y: vis.midY - f.height / 2))
+        }
         NSApp.activate(ignoringOtherApps: true)
     }
 

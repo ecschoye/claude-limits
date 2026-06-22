@@ -63,15 +63,10 @@ private struct WindowRow: View {
                 }
             }
             .frame(height: 6)
-            HStack {
-                Text(window.isActive ? "active" : "idle")
-                    .font(.caption2).foregroundStyle(.secondary)
-                Spacer()
-                if let reset = window.resetsAt {
-                    Countdown(date: reset)
-                } else {
-                    Text("reset —").font(.caption2).foregroundStyle(.secondary)
-                }
+            if let reset = window.resetsAt {
+                Countdown(date: reset)
+            } else {
+                Text("reset —").font(.caption2).foregroundStyle(.secondary)
             }
         }
     }
