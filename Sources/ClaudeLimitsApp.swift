@@ -1,23 +1,11 @@
 import SwiftUI
 import AppKit
 
-enum Keys {
-    static let mode = "menubar.mode"
-}
-
-// Menu bar display mode.
-enum MenuBarMode: String, CaseIterable {
-    case fiveHour    // one 5h icon, popup shows 5h
-    case sevenDay    // one 7d icon, popup shows 7d
-    case separate    // two icons, each popup its own window
-    case unified     // one 5h icon, popup shows BOTH 5h and 7d
-}
-
 @main
 struct ClaudeLimitsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     var body: some Scene {
-        Settings { EmptyView() }   // menu bar items + settings window managed in AppKit
+        Settings { EmptyView() }   // agent app; menu bar + settings window managed in AppKit
     }
 }
 
@@ -33,18 +21,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// One NSStatusItem per enabled "provider:metric" icon. Each provider has one shared popover
+// (showing all its metrics). Icons follow MenuConfig; the cog opens the Settings window.
 @MainActor
 final class MenuBarController {
-    // statusID = the menu bar item; barWindow = which window's % shows on the icon;
-    // popupWindows = which window rows the popover shows.
-    private struct ItemDef { let statusID: String; let caption: String; let barWindow: String; let popupWindows: [String] }
-
     private let store: UsageStore
-    private var items: [String: NSStatusItem] = [:]
-    private var popovers: [String: NSPopover] = [:]
-    private var defs: [String: ItemDef] = [:]
+    private var items: [String: NSStatusItem] = [:]   // "provider:metric" -> item
+    private var popovers: [String: NSPopover] = [:]   // providerID -> popover
     private var settingsWindow: NSWindow?
     private var defaultsObserver: NSObjectProtocol?
+    private var lastIcons: [String] = []
 
     init(store: UsageStore) {
         self.store = store
@@ -54,81 +40,81 @@ final class MenuBarController {
         ) { [weak self] _ in Task { @MainActor in self?.syncItems() } }
         syncItems()
     }
-
-    private var mode: MenuBarMode {
-        MenuBarMode(rawValue: UserDefaults.standard.string(forKey: Keys.mode) ?? "") ?? .fiveHour
-    }
-
-    private func wantedDefs() -> [ItemDef] {
-        switch mode {
-        case .fiveHour:
-            return [ItemDef(statusID: "session", caption: "5h", barWindow: "session", popupWindows: ["session"])]
-        case .sevenDay:
-            return [ItemDef(statusID: "weekly", caption: "7d", barWindow: "weekly", popupWindows: ["weekly"])]
-        case .separate:
-            return [
-                ItemDef(statusID: "session", caption: "5h", barWindow: "session", popupWindows: ["session"]),
-                ItemDef(statusID: "weekly",  caption: "7d", barWindow: "weekly",  popupWindows: ["weekly"]),
-            ]
-        case .unified:
-            return [ItemDef(statusID: "session", caption: "5h", barWindow: "session", popupWindows: ["session", "weekly"])]
-        }
-    }
+    // No deinit: app-lifetime singleton.
 
     private func syncItems() {
-        let wanted = wantedDefs()
-        let wantedIDs = Set(wanted.map { $0.statusID })
+        let icons = MenuConfig.icons()
+        // Only rebuild structure when the icon set changed (color/threshold writes also fire
+        // didChangeNotification — those just need a re-render, not a teardown).
+        guard icons != lastIcons else { updateImages(); return }
+        lastIcons = icons
+        let wantedIcons = Set(icons)
+        let activeProviders = Set(icons.compactMap { $0.split(separator: ":").first.map(String.init) })
 
-        for id in Array(items.keys) where !wantedIDs.contains(id) {
-            if let item = items[id] { NSStatusBar.system.removeStatusItem(item) }
-            items[id] = nil; popovers[id] = nil; defs[id] = nil
+        for id in Array(items.keys) where !wantedIcons.contains(id) {
+            if let it = items[id] { NSStatusBar.system.removeStatusItem(it) }
+            items[id] = nil
         }
-
-        for d in wanted {
-            defs[d.statusID] = d
-            if items[d.statusID] == nil {
-                let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-                item.button?.target = self
-                item.button?.action = #selector(togglePopover(_:))
-                item.button?.identifier = NSUserInterfaceItemIdentifier(d.statusID)
-                items[d.statusID] = item
-            }
-            // Rebuild the popover so its window set matches the current mode (cheap).
+        for pid in Array(popovers.keys) where !activeProviders.contains(pid) {
+            if popovers[pid]?.isShown == true { popovers[pid]?.performClose(nil) }
+            popovers[pid] = nil
+        }
+        for pid in activeProviders where popovers[pid] == nil {
             let pop = NSPopover()
             pop.behavior = .transient
             pop.contentViewController = NSHostingController(rootView:
-                PopupView(store: store, windowIDs: d.popupWindows,
+                PopupView(store: store, providerID: pid,
                           onOpenSettings: { [weak self] in self?.openSettings() }))
-            popovers[d.statusID] = pop
+            popovers[pid] = pop
+        }
+        for icon in icons where items[icon] == nil {
+            let it = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            it.button?.target = self
+            it.button?.action = #selector(togglePopover(_:))
+            it.button?.identifier = NSUserInterfaceItemIdentifier(icon)
+            items[icon] = it
         }
         updateImages()
     }
 
     private func updateImages() {
-        for (id, item) in items {
-            guard let button = item.button, let d = defs[id] else { continue }
-            let v = value(for: d.barWindow)
-            button.image = Self.render(caption: d.caption, value: v)
+        for (icon, it) in items {
+            guard let button = it.button else { continue }
+            let parts = icon.split(separator: ":").map(String.init)
+            guard parts.count == 2 else { continue }
+            let (pid, mid) = (parts[0], parts[1])
+            let prov = store.provider(pid)
+            let v = value(pid, mid)
+            let caption = mid == "credits" ? nil : mid
+            button.image = Self.render(logo: prov.flatMap { Self.logo($0.logoAsset) },
+                                       tag: tag(pid), caption: caption, value: v)
             button.imagePosition = .imageOnly
-            button.toolTip = "Claude \(d.caption): \(v)"
+            button.toolTip = "\(prov?.displayName ?? pid) \(mid): \(v)"
         }
     }
 
-    private func value(for id: String) -> String {
-        switch store.state {
-        case .ok(let ws): return ws.first { $0.id == id }.map { "\($0.percent)%" } ?? "--"
-        case .loading:    return "··"
-        default:          return "!"
+    private func value(_ pid: String, _ mid: String) -> String {
+        switch store.state(pid) {
+        case .ok: return store.metric(pid, mid)?.display ?? "--"
+        case .loading: return "··"
+        default: return "!"
         }
     }
 
-    @objc private func togglePopover(_ sender: NSStatusBarButton) {
-        guard let id = sender.identifier?.rawValue, let pop = popovers[id] else { return }
+    private func tag(_ pid: String) -> String {
+        switch pid { case "claude": return "CC"; case "codex": return "CX"; default: return "OR" }
+    }
+
+    @objc private func togglePopover(_ sender: Any?) {
+        guard let button = sender as? NSStatusBarButton,
+              let icon = button.identifier?.rawValue,
+              let pid = icon.split(separator: ":").first.map(String.init),
+              let pop = popovers[pid] else { return }
         if pop.isShown {
             pop.performClose(sender)
         } else {
-            pop.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-            NSApp.activate(ignoringOtherApps: true)
+            pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            NSApp.activate()
         }
     }
 
@@ -137,7 +123,7 @@ final class MenuBarController {
         if settingsWindow == nil {
             let host = NSHostingController(rootView: SettingsView())
             let win = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 340, height: 460),
+                contentRect: NSRect(x: 0, y: 0, width: 360, height: 520),
                 styleMask: [.titled, .closable],
                 backing: .buffered, defer: false)
             win.contentViewController = host
@@ -147,7 +133,9 @@ final class MenuBarController {
         }
         guard let win = settingsWindow else { return }
         win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
+        // Center on the next tick so the hosting controller has finalized the window size
+        // (a freshly created window otherwise centers against its pre-layout frame).
         Task { @MainActor in
             guard let screen = NSScreen.main else { return }
             let f = win.frame, vis = screen.visibleFrame
@@ -155,11 +143,30 @@ final class MenuBarController {
         }
     }
 
-    @MainActor
-    static func render(caption: String, value: String) -> NSImage {
+    // Monochrome (template) logo from Resources, sized for the menu bar.
+    static func logo(_ name: String) -> NSImage? {
+        for ext in ["pdf", "png"] {
+            if let p = Bundle.main.path(forResource: name, ofType: ext),
+               let img = NSImage(contentsOfFile: p) {
+                img.isTemplate = true
+                return img
+            }
+        }
+        return nil
+    }
+
+    static func render(logo: NSImage?, tag: String, caption: String?, value: String) -> NSImage {
+        // Top half: name (logo/tag) + window inline. Bottom half: the value (stats style, not bold).
         let content = VStack(spacing: -1) {
-            Text(caption).font(.system(size: 8))
-            Text(value).font(.system(size: 11, weight: .bold)).monospacedDigit()
+            HStack(spacing: 2) {
+                if let logo {
+                    Image(nsImage: logo).resizable().frame(width: 9, height: 9)
+                } else {
+                    Text(tag).font(.system(size: 8, weight: .semibold))
+                }
+                if let caption { Text(caption).font(.system(size: 8)) }
+            }
+            Text(value).font(.system(size: 11, weight: .medium)).monospacedDigit()
         }
         .fixedSize()
         .foregroundStyle(.black)

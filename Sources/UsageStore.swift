@@ -1,100 +1,100 @@
 import SwiftUI
 import AppKit
+import UserNotifications
 
 @MainActor
 @Observable
 final class UsageStore {
-    private(set) var state: FetchState = .loading
-    private(set) var lastUpdated: Date?
-
-    /// Called after every state change so the AppKit menu bar items can re-render.
+    private(set) var states: [String: ProviderState] = [:]   // providerID -> state
     var onUpdate: (@MainActor () -> Void)?
 
-    private var token: ClaudeToken?
-    private var loop: Task<Void, Never>?
-    private var failureStreak: UInt64 = 0
-    private var lastFetchAt: Date?
+    let providers: [UsageProvider] = [ClaudeProvider(), CodexProvider(), OpenRouterProvider()]
 
-    private let basePollSeconds: UInt64 = 300        // 5 min; data moves slowly
-    private let minRefreshInterval: TimeInterval = 15 // coalesce rapid manual/popup refreshes
+    private var loop: Task<Void, Never>?
+    private var lastFetch: [String: Date] = [:]
+    private var failures: [String: Int] = [:]
+    private var wakeObs: NSObjectProtocol?
+    private var clockObs: NSObjectProtocol?
+    private var lowCreditNotified = false
+
+    private let basePoll: UInt64 = 300
+    private let minInterval: TimeInterval = 15
+
+    func provider(_ id: String) -> UsageProvider? { providers.first { $0.id == id } }
+    func state(_ id: String) -> ProviderState { states[id] ?? .loading }
+    func metric(_ providerID: String, _ metricID: String) -> Metric? {
+        if case .ok(let ms) = state(providerID) { return ms.first { $0.id == metricID } }
+        return nil
+    }
 
     func start() {
         observeWakeAndClock()
+        loop?.cancel()
         loop = Task { [weak self] in await self?.run() }
     }
 
-    func stop() { loop?.cancel() }
-
     private func run() async {
         while !Task.isCancelled {
-            await refresh()
-            let wait = failureStreak > 0
-                ? min(basePollSeconds << failureStreak, 1800)   // back off, cap 30 min
-                : basePollSeconds
+            await refreshAll()
+            let streak = failures.values.max() ?? 0
+            let wait = streak > 0 ? min(basePoll << UInt64(min(streak, 3)), 1800) : basePoll
             try? await Task.sleep(for: .seconds(Double(wait)))
         }
     }
 
-    /// Immediate refresh (popup open, wake, manual button), throttled so no path can
-    /// hammer the rate-limit-sensitive endpoint. Within the window we serve the cached state.
-    func refresh() async {
-        if let last = lastFetchAt, Date().timeIntervalSince(last) < minRefreshInterval {
-            return
-        }
-        if needsTokenReload {
-            switch Keychain.readToken() {
-            case .success(let t): token = t
-            case .failure(let e): apply(map(e)); return
-            }
-        }
-        guard let t = token else { apply(.noToken); return }
-
-        lastFetchAt = Date()
-        let result = await UsageClient.fetch(token: t)
-        if result == .unauthorized {
-            // CLI may have just rotated the token in the keychain; re-read once and retry.
-            if case .success(let fresh) = Keychain.readToken() {
-                token = fresh
-                apply(await UsageClient.fetch(token: fresh))
-                return
-            }
-        }
-        apply(result)
+    func refreshAll() async {
+        let active = MenuConfig.providers()
+        for p in providers where active.contains(p.id) { await refresh(p) }
     }
 
-    private var needsTokenReload: Bool {
-        guard let token else { return true }
-        return Date() >= token.expiresAt
+    func refresh(_ p: UsageProvider) async {
+        if let last = lastFetch[p.id] {
+            let dt = Date().timeIntervalSince(last)
+            if dt >= 0 && dt < minInterval { return }   // throttle; dt<0 (clock back) not throttled
+        }
+        lastFetch[p.id] = Date()
+        var result = await p.fetch()
+        if result == .unauthorized { result = await p.fetch() }   // creds re-read inside fetch; one retry
+        apply(p.id, result)
     }
 
-    private func apply(_ s: FetchState) {
-        state = s
+    private func apply(_ id: String, _ s: ProviderState) {
+        states[id] = s
         switch s {
-        case .ok: lastUpdated = Date(); failureStreak = 0
-        case .expired, .noToken, .keychainDenied, .unauthorized, .schemaMismatch:
-            failureStreak = 0                       // not transient, don't back off
-        case .rateLimited, .serverError, .networkError:
-            failureStreak = min(failureStreak + 1, 3)
-        case .loading: break
+        case .rateLimited, .serverError, .networkError: failures[id, default: 0] += 1
+        default: failures[id] = 0
         }
+        checkLowCredit()
         onUpdate?()
     }
 
-    private func map(_ e: KeychainError) -> FetchState {
-        switch e {
-        case .notFound: return .noToken
-        case .accessDenied: return .keychainDenied
-        case .malformed, .other: return .schemaMismatch
+    // OpenRouter low-credit local notification, debounced to once per downward crossing.
+    private func checkLowCredit() {
+        guard NotifyPrefs.enabled, let m = metric("openrouter", "credits"), let remaining = m.amount else { return }
+        if remaining < NotifyPrefs.threshold {
+            if !lowCreditNotified { postLowCredit(m.display); lowCreditNotified = true }
+        } else {
+            lowCreditNotified = false
         }
     }
 
-    private func observeWakeAndClock() {
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in Task { @MainActor in await self?.refresh() } }
-
-        NotificationCenter.default.addObserver(
-            forName: .NSSystemClockDidChange, object: nil, queue: .main
-        ) { [weak self] _ in Task { @MainActor in await self?.refresh() } }
+    private func postLowCredit(_ display: String) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        let content = UNMutableNotificationContent()
+        content.title = "OpenRouter credits low"
+        content.body = "\(display) remaining"
+        center.add(UNNotificationRequest(identifier: "or-low-credit", content: content, trigger: nil))
     }
+
+    private func observeWakeAndClock() {
+        wakeObs = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in Task { @MainActor in await self?.refreshAll() } }
+
+        clockObs = NotificationCenter.default.addObserver(
+            forName: .NSSystemClockDidChange, object: nil, queue: .main
+        ) { [weak self] _ in Task { @MainActor in await self?.refreshAll() } }
+    }
+    // No deinit: the store is an app-lifetime singleton; observers live as long as the app.
 }

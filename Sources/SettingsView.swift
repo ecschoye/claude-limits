@@ -2,18 +2,37 @@ import SwiftUI
 import ServiceManagement
 
 struct SettingsView: View {
-    @AppStorage(Keys.mode) private var mode: MenuBarMode = .fiveHour
+    // Observe icon-set + threshold changes so toggles reflect live.
+    @AppStorage(MenuConfig.key) private var iconsCSV = MenuConfig.defaultIcons
     @AppStorage(ColorPrefs.warnAtKey) private var warnAt = 60
     @AppStorage(ColorPrefs.critAtKey) private var critAt = 85
+    @AppStorage("or.notify") private var notifyLow = true
+    @AppStorage("or.threshold") private var threshold = 5.0
+    @State private var orKey = KeychainStore.read("openrouter") ?? ""
+
+    private let providers: [(id: String, name: String, metrics: [(id: String, label: String)])] = [
+        ("claude", "Claude", [("5h", "5-hour"), ("7d", "Weekly")]),
+        ("codex", "Codex", [("5h", "5-hour"), ("7d", "Weekly")]),
+        ("openrouter", "OpenRouter", [("credits", "Credits")]),
+    ]
 
     var body: some View {
         Form {
-            Section("Menu bar") {
-                Picker("Display", selection: $mode) {
-                    Text("5-hour only").tag(MenuBarMode.fiveHour)
-                    Text("Weekly only").tag(MenuBarMode.sevenDay)
-                    Text("Both (separate icons)").tag(MenuBarMode.separate)
-                    Text("Unified (5h icon, both in popup)").tag(MenuBarMode.unified)
+            ForEach(providers, id: \.id) { p in
+                Section(p.name) {
+                    ForEach(p.metrics, id: \.id) { m in
+                        Toggle("Show \(m.label)", isOn: iconBinding("\(p.id):\(m.id)"))
+                    }
+                    if p.id == "openrouter" {
+                        SecureField("API key (blank = read ~/.zshenv)", text: $orKey)
+                        Button("Save key") {
+                            KeychainStore.write("openrouter", orKey.trimmingCharacters(in: .whitespaces))
+                        }
+                        Toggle("Notify when credits low", isOn: $notifyLow)
+                        if notifyLow {
+                            Stepper("Alert below $\(Int(threshold))", value: $threshold, in: 1...100, step: 1)
+                        }
+                    }
                 }
             }
 
@@ -25,19 +44,23 @@ struct SettingsView: View {
                 ColorPicker("Critical", selection: hexBinding(ColorPrefs.critKey, ColorPrefs.defaultCrit))
             }
 
-            Section("Startup") {
-                LaunchAtLogin()
-            }
-
-            Section {
-                Button("Quit Claude Limits") { NSApplication.shared.terminate(nil) }
-            }
+            Section("Startup") { LaunchAtLogin() }
+            Section { Button("Quit Claude Limits") { NSApplication.shared.terminate(nil) } }
         }
         .formStyle(.grouped)
-        .frame(width: 340, height: 460)
+        .frame(width: 360, height: 520)
     }
 
-    // ColorPicker <-> @AppStorage hex string.
+    // Toggle an icon on/off, refusing to disable the last remaining one.
+    private func iconBinding(_ icon: String) -> Binding<Bool> {
+        Binding(
+            get: { MenuConfig.isOn(icon) },
+            set: { on in
+                if !on && MenuConfig.icons() == [icon] { return }
+                MenuConfig.toggle(icon, on)
+            })
+    }
+
     private func hexBinding(_ key: String, _ fallback: String) -> Binding<Color> {
         Binding(
             get: { Color(hex: UserDefaults.standard.string(forKey: key) ?? fallback) ?? .gray },
@@ -51,8 +74,7 @@ struct LaunchAtLogin: View {
 
     private var inApplications: Bool {
         let p = Bundle.main.bundlePath
-        return p.hasPrefix("/Applications/")
-            || p.hasPrefix(NSHomeDirectory() + "/Applications/")
+        return p.hasPrefix("/Applications/") || p.hasPrefix(NSHomeDirectory() + "/Applications/")
     }
 
     var body: some View {
@@ -60,8 +82,6 @@ struct LaunchAtLogin: View {
             Toggle("Launch at login", isOn: Binding(
                 get: { status == .enabled },
                 set: { setEnabled($0) }))
-                // Block enabling from outside /Applications, but always allow turning OFF
-                // an existing registration (e.g. one made before this gate existed).
                 .disabled(!inApplications && status != .enabled)
 
             if !inApplications {
@@ -69,9 +89,7 @@ struct LaunchAtLogin: View {
             } else if status == .requiresApproval {
                 note("Approve in System Settings > General > Login Items.")
             }
-            if let errorText {
-                note(errorText, color: .orange)
-            }
+            if let errorText { note(errorText, color: .orange) }
         }
         .onAppear { status = SMAppService.mainApp.status }
     }
@@ -83,8 +101,7 @@ struct LaunchAtLogin: View {
 
     private func setEnabled(_ on: Bool) {
         do {
-            if on { try SMAppService.mainApp.register() }
-            else  { try SMAppService.mainApp.unregister() }
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
             errorText = nil
         } catch {
             errorText = error.localizedDescription
