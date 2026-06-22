@@ -1,18 +1,23 @@
 import SwiftUI
 import AppKit
 
-// Shared UserDefaults keys (menu bar items + settings).
 enum Keys {
-    static let show5h = "menubar.show5h"
-    static let show7d = "menubar.show7d"
+    static let mode = "menubar.mode"
+}
+
+// Menu bar display mode.
+enum MenuBarMode: String, CaseIterable {
+    case fiveHour    // one 5h icon, popup shows 5h
+    case sevenDay    // one 7d icon, popup shows 7d
+    case separate    // two icons, each popup its own window
+    case unified     // one 5h icon, popup shows BOTH 5h and 7d
 }
 
 @main
 struct ClaudeLimitsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     var body: some Scene {
-        // Agent app; menu bar items + settings window are managed by AppDelegate (AppKit).
-        Settings { EmptyView() }
+        Settings { EmptyView() }   // menu bar items + settings window managed in AppKit
     }
 }
 
@@ -22,25 +27,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBar: MenuBarController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)   // no Dock icon
+        NSApp.setActivationPolicy(.accessory)
         menuBar = MenuBarController(store: store)
         store.start()
     }
 }
 
-// One NSStatusItem per enabled window. Each icon has its OWN popover showing only that
-// window's detail; the gear in any popover opens the shared settings window.
 @MainActor
 final class MenuBarController {
-    private struct Window { let id: String; let caption: String; let key: String; let defaultOn: Bool }
-    private let windows = [
-        Window(id: "session", caption: "5h", key: Keys.show5h, defaultOn: true),
-        Window(id: "weekly",  caption: "7d", key: Keys.show7d, defaultOn: false),
-    ]
+    // statusID = the menu bar item; barWindow = which window's % shows on the icon;
+    // popupWindows = which window rows the popover shows.
+    private struct ItemDef { let statusID: String; let caption: String; let barWindow: String; let popupWindows: [String] }
 
     private let store: UsageStore
     private var items: [String: NSStatusItem] = [:]
     private var popovers: [String: NSPopover] = [:]
+    private var defs: [String: ItemDef] = [:]
     private var settingsWindow: NSWindow?
     private var defaultsObserver: NSObjectProtocol?
 
@@ -53,42 +55,62 @@ final class MenuBarController {
         syncItems()
     }
 
-    private func isOn(_ w: Window) -> Bool {
-        UserDefaults.standard.object(forKey: w.key) == nil
-            ? w.defaultOn
-            : UserDefaults.standard.bool(forKey: w.key)
+    private var mode: MenuBarMode {
+        MenuBarMode(rawValue: UserDefaults.standard.string(forKey: Keys.mode) ?? "") ?? .fiveHour
+    }
+
+    private func wantedDefs() -> [ItemDef] {
+        switch mode {
+        case .fiveHour:
+            return [ItemDef(statusID: "session", caption: "5h", barWindow: "session", popupWindows: ["session"])]
+        case .sevenDay:
+            return [ItemDef(statusID: "weekly", caption: "7d", barWindow: "weekly", popupWindows: ["weekly"])]
+        case .separate:
+            return [
+                ItemDef(statusID: "session", caption: "5h", barWindow: "session", popupWindows: ["session"]),
+                ItemDef(statusID: "weekly",  caption: "7d", barWindow: "weekly",  popupWindows: ["weekly"]),
+            ]
+        case .unified:
+            return [ItemDef(statusID: "session", caption: "5h", barWindow: "session", popupWindows: ["session", "weekly"])]
+        }
     }
 
     private func syncItems() {
-        for w in windows {
-            if isOn(w), items[w.id] == nil {
+        let wanted = wantedDefs()
+        let wantedIDs = Set(wanted.map { $0.statusID })
+
+        for id in Array(items.keys) where !wantedIDs.contains(id) {
+            if let item = items[id] { NSStatusBar.system.removeStatusItem(item) }
+            items[id] = nil; popovers[id] = nil; defs[id] = nil
+        }
+
+        for d in wanted {
+            defs[d.statusID] = d
+            if items[d.statusID] == nil {
                 let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
                 item.button?.target = self
                 item.button?.action = #selector(togglePopover(_:))
-                item.button?.identifier = NSUserInterfaceItemIdentifier(w.id)
-                items[w.id] = item
-
-                let pop = NSPopover()
-                pop.behavior = .transient
-                pop.contentViewController = NSHostingController(rootView:
-                    PopupView(store: store, windowID: w.id,
-                              onOpenSettings: { [weak self] in self?.openSettings() }))
-                popovers[w.id] = pop
-            } else if !isOn(w), let item = items[w.id] {
-                NSStatusBar.system.removeStatusItem(item)
-                items[w.id] = nil
-                popovers[w.id] = nil
+                item.button?.identifier = NSUserInterfaceItemIdentifier(d.statusID)
+                items[d.statusID] = item
             }
+            // Rebuild the popover so its window set matches the current mode (cheap).
+            let pop = NSPopover()
+            pop.behavior = .transient
+            pop.contentViewController = NSHostingController(rootView:
+                PopupView(store: store, windowIDs: d.popupWindows,
+                          onOpenSettings: { [weak self] in self?.openSettings() }))
+            popovers[d.statusID] = pop
         }
         updateImages()
     }
 
     private func updateImages() {
-        for w in windows {
-            guard let button = items[w.id]?.button else { continue }
-            button.image = Self.render(caption: w.caption, value: value(for: w.id))
+        for (id, item) in items {
+            guard let button = item.button, let d = defs[id] else { continue }
+            let v = value(for: d.barWindow)
+            button.image = Self.render(caption: d.caption, value: v)
             button.imagePosition = .imageOnly
-            button.toolTip = "Claude \(w.caption): \(value(for: w.id))"
+            button.toolTip = "Claude \(d.caption): \(v)"
         }
     }
 
@@ -125,14 +147,14 @@ final class MenuBarController {
         }
         guard let win = settingsWindow else { return }
         win.makeKeyAndOrderFront(nil)
-        if let screen = win.screen ?? NSScreen.main {
+        NSApp.activate(ignoringOtherApps: true)
+        Task { @MainActor in
+            guard let screen = NSScreen.main else { return }
             let f = win.frame, vis = screen.visibleFrame
             win.setFrameOrigin(NSPoint(x: vis.midX - f.width / 2, y: vis.midY - f.height / 2))
         }
-        NSApp.activate(ignoringOtherApps: true)
     }
 
-    // Render the stacked cell to a template image for the status button.
     @MainActor
     static func render(caption: String, value: String) -> NSImage {
         let content = VStack(spacing: -1) {
@@ -140,7 +162,7 @@ final class MenuBarController {
             Text(value).font(.system(size: 11, weight: .bold)).monospacedDigit()
         }
         .fixedSize()
-        .foregroundStyle(.black)   // template image keys on alpha; color is irrelevant
+        .foregroundStyle(.black)
 
         let renderer = ImageRenderer(content: content)
         renderer.scale = 2

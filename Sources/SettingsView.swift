@@ -2,17 +2,19 @@ import SwiftUI
 import ServiceManagement
 
 struct SettingsView: View {
-    @AppStorage(Keys.show5h) private var show5h = true
-    @AppStorage(Keys.show7d) private var show7d = false
+    @AppStorage(Keys.mode) private var mode: MenuBarMode = .fiveHour
     @AppStorage(ColorPrefs.warnAtKey) private var warnAt = 60
     @AppStorage(ColorPrefs.critAtKey) private var critAt = 85
 
     var body: some View {
         Form {
-            Section("Menu bar icons") {
-                // The last enabled icon can't be turned off (else no way back to settings).
-                Toggle("Show 5h", isOn: $show5h).disabled(show5h && !show7d)
-                Toggle("Show 7d", isOn: $show7d).disabled(show7d && !show5h)
+            Section("Menu bar") {
+                Picker("Display", selection: $mode) {
+                    Text("5-hour only").tag(MenuBarMode.fiveHour)
+                    Text("Weekly only").tag(MenuBarMode.sevenDay)
+                    Text("Both (separate icons)").tag(MenuBarMode.separate)
+                    Text("Unified (5h icon, both in popup)").tag(MenuBarMode.unified)
+                }
             }
 
             Section("Colors") {

@@ -4,18 +4,17 @@ import AppKit
 // Per-icon popup: shows ONLY this window's detail, plus a gear that opens the settings window.
 struct PopupView: View {
     let store: UsageStore
-    let windowID: String          // "session" | "weekly"
+    let windowIDs: [String]       // one ("session"/"weekly") or both (unified)
     let onOpenSettings: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             switch store.state {
             case .ok(let windows):
-                if let w = windows.first(where: { $0.id == windowID }) {
-                    WindowRow(window: w)
-                } else {
-                    Text("No data for this window.")
-                        .font(.caption).foregroundStyle(.secondary)
+                ForEach(windowIDs, id: \.self) { id in
+                    if let w = windows.first(where: { $0.id == id }) {
+                        WindowRow(window: w)
+                    }
                 }
             case .loading:
                 Label("Loading…", systemImage: "hourglass").foregroundStyle(.secondary)
