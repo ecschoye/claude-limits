@@ -31,6 +31,7 @@ final class MenuBarController {
     private var settingsWindow: NSWindow?
     private var defaultsObserver: NSObjectProtocol?
     private var lastIcons: [String] = []
+    private var clickMonitor: Any?
 
     init(store: UsageStore) {
         self.store = store
@@ -111,15 +112,33 @@ final class MenuBarController {
               let pid = icon.split(separator: ":").first.map(String.init),
               let pop = popovers[pid] else { return }
         if pop.isShown {
-            pop.performClose(sender)
+            closePopovers()
         } else {
+            closePopovers()
             pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             NSApp.activate()
+            installClickMonitor()   // close on any click outside our app
         }
     }
 
-    private func openSettings() {
+    private func closePopovers() {
         popovers.values.forEach { if $0.isShown { $0.performClose(nil) } }
+        removeClickMonitor()
+    }
+
+    private func installClickMonitor() {
+        removeClickMonitor()
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            Task { @MainActor in self?.closePopovers() }
+        }
+    }
+
+    private func removeClickMonitor() {
+        if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
+    }
+
+    private func openSettings() {
+        closePopovers()
         if settingsWindow == nil {
             let host = NSHostingController(rootView: SettingsView())
             let win = NSWindow(

@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import UserNotifications
+import Network
 
 @MainActor
 @Observable
@@ -16,6 +17,7 @@ final class UsageStore {
     private var wakeObs: NSObjectProtocol?
     private var clockObs: NSObjectProtocol?
     private var lowCreditNotified = false
+    private let pathMonitor = NWPathMonitor()
 
     private let basePoll: UInt64 = 300
     private let minInterval: TimeInterval = 15
@@ -29,9 +31,22 @@ final class UsageStore {
 
     func start() {
         observeWakeAndClock()
+        observeConnectivity()
         loop?.cancel()
         loop = Task { [weak self] in await self?.run() }
     }
+
+    // Refetch as soon as connectivity returns (the 15s throttle bounds it).
+    private func observeConnectivity() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            guard path.status == .satisfied else { return }
+            Task { @MainActor in await self?.refreshAll() }
+        }
+        pathMonitor.start(queue: DispatchQueue.global(qos: .utility))
+    }
+
+    /// Manual refresh of every enabled provider (popup Refresh button).
+    func refreshNow() async { await refreshAll() }
 
     private func run() async {
         while !Task.isCancelled {
@@ -61,8 +76,8 @@ final class UsageStore {
     private func apply(_ id: String, _ s: ProviderState) {
         states[id] = s
         switch s {
-        case .rateLimited, .serverError, .networkError: failures[id, default: 0] += 1
-        default: failures[id] = 0
+        case .rateLimited: failures[id, default: 0] += 1   // only 429 backs off
+        default: failures[id] = 0                          // network/server errors retry at normal cadence
         }
         checkLowCredit()
         onUpdate?()

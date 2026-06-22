@@ -31,6 +31,15 @@ struct PopupView: View {
 
             Divider()
             HStack {
+                Button { Task { await store.refreshNow() } } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12))
+                        .frame(width: 24, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh")
+                .accessibilityLabel("Refresh")
                 Spacer()
                 Button(action: onOpenSettings) {
                     Image(systemName: "gearshape")
