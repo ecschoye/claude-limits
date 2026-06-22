@@ -9,6 +9,7 @@ func check(_ cond: Bool, _ msg: String) {
 }
 
 // --- formatRemaining ---
+check(formatRemaining(3 * 86400 + 21 * 3600 + 46 * 60) == "3d 21h", "days+hours formatting")
 check(formatRemaining(3 * 3600 + 13 * 60) == "3h 13m", "3h13m formatting")
 check(formatRemaining(45 * 60) == "45m", "45m formatting")
 check(formatRemaining(0) == "now", "zero -> now")

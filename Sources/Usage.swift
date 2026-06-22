@@ -72,10 +72,14 @@ enum UsageParse {
     }
 }
 
-/// Human countdown, e.g. 11580s -> "3h 13m", 2700s -> "45m", 0 -> "now".
+/// Human countdown: >=1 day -> "3d 21h", >=1 hour -> "5h 13m", else "45m", 0 -> "now".
 func formatRemaining(_ seconds: Int) -> String {
     let s = max(0, seconds)
     if s == 0 { return "now" }
-    let h = s / 3600, m = (s % 3600) / 60
-    return h > 0 ? "\(h)h \(m)m" : "\(m)m"
+    let d = s / 86400
+    let h = (s % 86400) / 3600
+    let m = (s % 3600) / 60
+    if d > 0 { return "\(d)d \(h)h" }
+    if h > 0 { return "\(h)h \(m)m" }
+    return "\(m)m"
 }

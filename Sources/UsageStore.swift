@@ -7,11 +7,16 @@ final class UsageStore {
     private(set) var state: FetchState = .loading
     private(set) var lastUpdated: Date?
 
+    /// Called after every state change so the AppKit menu bar items can re-render.
+    var onUpdate: (@MainActor () -> Void)?
+
     private var token: ClaudeToken?
     private var loop: Task<Void, Never>?
     private var failureStreak: UInt64 = 0
+    private var lastFetchAt: Date?
 
-    private let basePollSeconds: UInt64 = 300   // 5 min; data moves slowly
+    private let basePollSeconds: UInt64 = 300        // 5 min; data moves slowly
+    private let minRefreshInterval: TimeInterval = 15 // coalesce rapid manual/popup refreshes
 
     func start() {
         observeWakeAndClock()
@@ -30,8 +35,12 @@ final class UsageStore {
         }
     }
 
-    /// Force an immediate refresh (popup open, wake, manual button).
+    /// Immediate refresh (popup open, wake, manual button), throttled so no path can
+    /// hammer the rate-limit-sensitive endpoint. Within the window we serve the cached state.
     func refresh() async {
+        if let last = lastFetchAt, Date().timeIntervalSince(last) < minRefreshInterval {
+            return
+        }
         if needsTokenReload {
             switch Keychain.readToken() {
             case .success(let t): token = t
@@ -40,6 +49,7 @@ final class UsageStore {
         }
         guard let t = token else { apply(.noToken); return }
 
+        lastFetchAt = Date()
         let result = await UsageClient.fetch(token: t)
         if result == .unauthorized {
             // CLI may have just rotated the token in the keychain; re-read once and retry.
@@ -67,6 +77,7 @@ final class UsageStore {
             failureStreak = min(failureStreak + 1, 3)
         case .loading: break
         }
+        onUpdate?()
     }
 
     private func map(_ e: KeychainError) -> FetchState {
